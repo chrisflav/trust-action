@@ -79,11 +79,18 @@ inputs:
   with-hashes:
     description: >-
       Record each declaration's semantic hash, so the index can be matched
-      against trust certificates.  Off by default: it is a whole-environment
-      pass, a further minute for Lean core, and only an index that will be held
-      up against certificates needs it.
+      against trust certificates and against the snapshots `trust check` reads.
+
+      On by default, because a hash is only useful if it was there beforehand:
+      the question it answers is whether a declaration is the one it was at some
+      earlier commit, and an index exported without hashes cannot be given them
+      afterwards.  The cost is a pass over the whole environment — a further
+      minute for Lean core, more for a library on top of Mathlib, and the same
+      either way whether or not `module-filter` narrows what is exported, since
+      the pass is over the environment rather than over the selection.  Turn it
+      off for an index that only has to be read.
     required: false
-    default: 'false'
+    default: 'true'
   fast-prop:
     description: >-
       Treat exactly the theorems as proofs instead of asking `MetaM`.  Faster,

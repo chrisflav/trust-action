@@ -86,6 +86,27 @@ jobs:
           fi
           echo "auto selected the trust released for Lean $LEAN"
 
+          # Nothing above asks for hashes, so this is the default being tested.
+          # A default that decides whether an index can ever be checked against
+          # a certificate is worth asserting rather than assuming: an index
+          # exported without hashes cannot be given them afterwards.
+          if ! grep -q '"hasHashes"[[:space:]]*:[[:space:]]*true' "$INDEX_PATH/meta.json"; then
+            echo "::error::the index records no hashes, though with-hashes defaults to true"
+            exit 1
+          fi
+          HASHER="$(sed -n 's/.*"hasher"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INDEX_PATH/meta.json" | head -1)"
+          if [ -z "$HASHER" ]; then
+            echo "::error::the index claims hashes but names no hasher"
+            exit 1
+          fi
+          # Recorded per declaration as well as announced in meta.json: the
+          # frontend reads the hashes out of decls.jsonl, not out of the flag.
+          if grep -q '"hash":""' "$INDEX_PATH/decls.jsonl"; then
+            echo "::error::some declarations carry an empty hash"
+            exit 1
+          fi
+          echo "hashes recorded by $HASHER"
+
   # A Lean nobody has released a trust for has to fail in the action, naming
   # what does exist.  Left unchecked this is the case that would instead fail
   # inside `actions/checkout`, at a ref the caller never wrote.

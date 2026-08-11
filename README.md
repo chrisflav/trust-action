@@ -78,7 +78,7 @@ not been released:
 | `working-directory` | `.` | The Lake package to export, for a package that is not at the repository root. |
 | `with-bodies` | `true` | Export the edges that come from definition bodies. Without them definitions do not unfold in the UI. Proof terms are never exported either way. |
 | `with-code` | `true` | Export rendered, clickable declaration source. The largest part of an index by far — but without it the UI shows names and no statements. |
-| `with-hashes` | `false` | Record each declaration's semantic hash, so the index can be matched against trust certificates. A whole-environment pass, so off unless you need it. |
+| `with-hashes` | `true` | Record each declaration's semantic hash, so the index can be matched against trust certificates and against the snapshots `trust check` reads. A pass over the whole environment — the same cost whether or not `module-filter` narrows what is exported. Turn it off for an index that only has to be read. |
 | `fast-prop` | `false` | Treat exactly the theorems as proofs instead of asking `MetaM`. Faster, and wrong for a definition whose type happens to be a `Prop`. |
 | `module-filter` | every module | Restrict exported declarations to matching modules: a comma-separated list of `A.B.C`, `A.B.*`, `*`. Empty includes the dependencies' modules, which for a Mathlib-based library means Mathlib. |
 | `marks` | `trust-marks.json` | Marks file to carry into the index, relative to `working-directory` — the *indexed* repository's file. |
@@ -112,7 +112,6 @@ the binary is an output, that costs a step rather than a second build:
         uses: chrisflav/trust-action@v1
         with:
           module: MyLibrary
-          with-hashes: 'true'
       - run: lake env ${{ steps.trust.outputs.trust-bin }} check MyLibrary
 ```
 
@@ -137,7 +136,9 @@ cd /path/to/trust/web && npm run dev     # http://localhost:5173/?repo=mylibrary
 
 This action is versioned by its own inputs and outputs, not by Lean: `v1` is a
 moving tag that follows the latest `v1.x`, and breaking changes to the inputs
-above would be `v2`. The Lean version is `trust-ref`'s business, which is the
+above would be `v2`. A changed *default* rides `v1` — `v1.1.0` turned
+`with-hashes` on, which costs an environment pass that `v1.0.0` did not — so pin
+`v1.0.0` rather than `v1` if a workflow's runtime has to stay where it is. The Lean version is `trust-ref`'s business, which is the
 point of the two being separate repositories — a library bumping Lean should not
 have to edit a `uses:` line that has nothing to say about Lean.
 
