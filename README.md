@@ -116,6 +116,12 @@ the binary is an output, that costs a step rather than a second build:
       - run: lake env ${{ steps.trust.outputs.trust-bin }} check MyLibrary
 ```
 
+`trust` is a Lean program, so it wants a toolchain in scope: run it from inside
+the package, under `lake env`, which is also what puts the library's `.olean`
+files on `LEAN_PATH`. Run from a directory with no `lean-toolchain` above it, it
+fails with elan's `no default toolchain configured` rather than anything about
+trust.
+
 ## Looking at the result
 
 The frontend reads `<root>/<name>/meta.json` and `?repo=` selects the name, so

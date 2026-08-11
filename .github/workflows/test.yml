@@ -158,5 +158,9 @@ jobs:
           fi
           # The binary is an output because a caller may want to go on using it
           # — `trust check` to gate a build, say — and that only holds if it is
-          # still there and still runs.
-          "$TRUST_BIN" --help > /dev/null
+          # still there and still runs.  Run the way a caller would run it:
+          # from inside the package, under `lake env`.  It is a Lean program,
+          # so it needs a toolchain in scope, and the workspace root of a
+          # repository whose Lean lives in a subdirectory has none.
+          cd library
+          lake env "$TRUST_BIN" --help > /dev/null
