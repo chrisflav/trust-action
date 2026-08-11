@@ -34,25 +34,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Small enough to be free, and real enough that `lake env` puts a
-      # toolchain on LEAN_PATH: the module exported below is Lean's own, so the
-      # package needs no content, only a toolchain and a lakefile.
       - name: Write a Lake package pinned to Lean ${{ matrix.lean }}
         shell: bash
         env:
           LEAN: ${{ matrix.lean }}
-        run: |
-          set -euo pipefail
-          mkdir -p library
-          printf 'leanprover/lean4:%s\n' "$LEAN" > library/lean-toolchain
-          cat > library/lakefile.toml <<'EOF'
-          name = "library"
-          version = "0.1.0"
-
-          [[lean_lib]]
-          name = "Library"
-          EOF
-          printf 'def hello := "world"\n' > library/Library.lean
+        run: .github/scripts/scratch-package.sh library "$LEAN"
 
       - id: index
         uses: ./
@@ -111,18 +97,7 @@ jobs:
 
       - name: Write a Lake package pinned to a Lean with no trust
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p library
-          printf 'leanprover/lean4:v4.99.0\n' > library/lean-toolchain
-          cat > library/lakefile.toml <<'EOF'
-          name = "library"
-          version = "0.1.0"
-
-          [[lean_lib]]
-          name = "Library"
-          EOF
-          printf 'def hello := "world"\n' > library/Library.lean
+        run: .github/scripts/scratch-package.sh library v4.99.0
 
       - id: index
         continue-on-error: true
@@ -154,18 +129,7 @@ jobs:
 
       - name: Write a Lake package pinned to Lean v4.32.0
         shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p library
-          printf 'leanprover/lean4:v4.32.0\n' > library/lean-toolchain
-          cat > library/lakefile.toml <<'EOF'
-          name = "library"
-          version = "0.1.0"
-
-          [[lean_lib]]
-          name = "Library"
-          EOF
-          printf 'def hello := "world"\n' > library/Library.lean
+        run: .github/scripts/scratch-package.sh library v4.32.0
 
       - id: index
         uses: ./
