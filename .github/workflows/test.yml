@@ -1,0 +1,198 @@
+# This action runs in other people's repositories, where a mistake in it
+# surfaces as a broken build in a library we do not own.  So it runs here first.
+#
+# What is actually under test is the join between two independently versioned
+# things: this action, and the `trust` release its `auto` mode picks out of a
+# caller's `lean-toolchain`.  A single run would only ever exercise whichever
+# toolchain this repository happened to name — and this repository names none,
+# holding no Lean code — so each job builds a throwaway Lake package pinned to
+# the Lean under test and points the action at that.  The matrix is therefore
+# the list of trust releases, and adding one here is how a new release is
+# checked to be reachable.
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: test-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  auto:
+    strategy:
+      fail-fast: false
+      matrix:
+        lean: ['v4.31.0', 'v4.32.0']
+
+    name: auto → trust ${{ matrix.lean }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # Small enough to be free, and real enough that `lake env` puts a
+      # toolchain on LEAN_PATH: the module exported below is Lean's own, so the
+      # package needs no content, only a toolchain and a lakefile.
+      - name: Write a Lake package pinned to Lean ${{ matrix.lean }}
+        shell: bash
+        env:
+          LEAN: ${{ matrix.lean }}
+        run: |
+          set -euo pipefail
+          mkdir -p library
+          printf 'leanprover/lean4:%s\n' "$LEAN" > library/lean-toolchain
+          cat > library/lakefile.toml <<'EOF'
+          name = "library"
+          version = "0.1.0"
+
+          [[lean_lib]]
+          name = "Library"
+          EOF
+          printf 'def hello := "world"\n' > library/Library.lean
+
+      - id: index
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          index-name: core-gcd
+          working-directory: library
+          # The claim being tested is about which exporter ran, and rendered
+          # source is the largest part of an export by far without bearing on
+          # that.
+          with-code: 'false'
+          # The scratch package is not a git checkout, so there is nothing for
+          # the exporter to read a revision out of.
+          rev: ${{ matrix.lean }}
+
+      - name: Check that auto picked the release for this Lean
+        shell: bash
+        env:
+          INDEX_PATH: ${{ steps.index.outputs.index-path }}
+          DECL_COUNT: ${{ steps.index.outputs.decl-count }}
+          LEAN: ${{ matrix.lean }}
+        run: |
+          set -euo pipefail
+
+          for f in meta.json decls.jsonl stmt-edges.bin; do
+            if [ ! -s "$INDEX_PATH/$f" ]; then
+              echo "::error::$INDEX_PATH/$f is missing or empty"
+              exit 1
+            fi
+          done
+          # The closure of Init.Data.Nat.Gcd is thousands of declarations; a
+          # handful would mean the environment loaded but nothing was walked.
+          if [ "${DECL_COUNT:-0}" -lt 100 ]; then
+            echo "::error::the index holds $DECL_COUNT declarations"
+            exit 1
+          fi
+
+          # meta.json is the exporter's own account of the Lean it ran on, so it
+          # is what gets checked rather than the tag the resolver printed: the
+          # claim is about which exporter ran, and only the index can answer it.
+          GOT="v$(sed -n 's/.*"toolchain"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$INDEX_PATH/meta.json" | head -1)"
+          if [ "$GOT" != "$LEAN" ]; then
+            echo "::error::asked for a library on Lean $LEAN, index was written by $GOT"
+            exit 1
+          fi
+          echo "auto selected the trust released for Lean $LEAN"
+
+  # A Lean nobody has released a trust for has to fail in the action, naming
+  # what does exist.  Left unchecked this is the case that would instead fail
+  # inside `actions/checkout`, at a ref the caller never wrote.
+  unreleased:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Write a Lake package pinned to a Lean with no trust
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p library
+          printf 'leanprover/lean4:v4.99.0\n' > library/lean-toolchain
+          cat > library/lakefile.toml <<'EOF'
+          name = "library"
+          version = "0.1.0"
+
+          [[lean_lib]]
+          name = "Library"
+          EOF
+          printf 'def hello := "world"\n' > library/Library.lean
+
+      - id: index
+        continue-on-error: true
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          working-directory: library
+
+      - name: Check that it refused, rather than trying to build something
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.index.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::the action reported '$OUTCOME' for a Lean with no trust release"
+            exit 1
+          fi
+          echo "refused, as it should"
+
+  # The escape hatch: a ref given by hand, for pinning an exporter exactly or
+  # for testing one that has not been released.  It has to keep working, since
+  # it is the only way out when `auto` is wrong.
+  explicit-ref:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Write a Lake package pinned to Lean v4.32.0
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p library
+          printf 'leanprover/lean4:v4.32.0\n' > library/lean-toolchain
+          cat > library/lakefile.toml <<'EOF'
+          name = "library"
+          version = "0.1.0"
+
+          [[lean_lib]]
+          name = "Library"
+          EOF
+          printf 'def hello := "world"\n' > library/Library.lean
+
+      - id: index
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          working-directory: library
+          trust-ref: v4.32.0
+          with-code: 'false'
+          rev: explicit
+
+      - name: Check the index and the binary it hands back
+        shell: bash
+        env:
+          INDEX_PATH: ${{ steps.index.outputs.index-path }}
+          TRUST_BIN: ${{ steps.index.outputs.trust-bin }}
+          REV: ${{ steps.index.outputs.rev }}
+        run: |
+          set -euo pipefail
+          if [ ! -s "$INDEX_PATH/meta.json" ]; then
+            echo "::error::$INDEX_PATH/meta.json is missing or empty"
+            exit 1
+          fi
+          if [ "$REV" != explicit ]; then
+            echo "::error::rev output is '$REV', not the one that was passed in"
+            exit 1
+          fi
+          # The binary is an output because a caller may want to go on using it
+          # — `trust check` to gate a build, say — and that only holds if it is
+          # still there and still runs.
+          "$TRUST_BIN" --help > /dev/null
