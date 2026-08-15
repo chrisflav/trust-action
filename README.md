@@ -87,6 +87,8 @@ not been released:
 | `trust-ref` | `auto` | Which `trust` to build: `auto` for the release matching your toolchain, or any ref in `chrisflav/trust`. |
 | `require-matching-toolchain` | `true` | Fail when the library and `trust` name different Lean toolchains. Under `auto` they agree by construction; what this then catches is a release tagged for a Lean it was not built on. |
 | `cache` | `true` | Cache the built `trust` binary between runs, keyed on a hash of its sources and the toolchain. |
+| `publish` | `false` | Where to publish the index so that a browser can read it. `branch` force-pushes it to `publish-branch`, where `raw.githubusercontent.com` serves it anonymously. Needs `permissions: contents: write` on the job. |
+| `publish-branch` | `trust-index` | The branch `publish: branch` writes to. The frontend looks there when given only a repository, so changing it means readers have to be told the branch as well. |
 
 ## Outputs
 
@@ -97,6 +99,7 @@ not been released:
 | `index-name` | The name the index was written under, i.e. the `?repo=` value. |
 | `rev` | The revision recorded in the index, as `meta.json` reports it. |
 | `decl-count` | How many declarations the index holds. |
+| `index-url` | Where a published index is readable, i.e. the base a frontend fetches `meta.json` from. Empty unless `publish` wrote one. |
 | `trust-bin` | The `trust` binary that was built, so a later step can run `trust check` or `trust cert issue` without building it twice. |
 
 Every run also writes a summary — declarations, edges, revision, size — to the
@@ -123,13 +126,47 @@ trust.
 
 ## Looking at the result
 
+### Published, so that anyone can
+
+```yaml
+permissions:
+  contents: write
+steps:
+  - uses: actions/checkout@v5
+  - uses: chrisflav/trust-action@v1
+    with:
+      module: MyLibrary
+      publish: branch
+```
+
+The index is force-pushed to a `trust-index` branch, and any deployment of the
+frontend then reads it given nothing but the repository:
+`https://trust.example.org/?gh=owner/repo`.
+
+**Why a branch and not the artifact.**  Downloading a workflow artifact requires
+a token with the `repo` scope *even when the repository is public*, so a frontend
+that read artifacts would have to ask every reader for full control of their
+private repositories in order to show them a public dependency graph.  A branch
+is anonymous, `raw.githubusercontent.com` serves it with
+`Access-Control-Allow-Origin: *` and gzip, and it does not expire after thirty
+days the way an artifact does.
+
+What it costs is repository size.  Measured on a Mathlib-based development whose
+index is 302 MB across 123 files: **50 MB** packed, and about 20 seconds to
+push.  The branch is orphaned and force-pushed, so it stays one commit deep
+rather than accumulating that per run.  The ceiling is git's 100 MB per file;
+`decls.jsonl` is the file that grows with the library, and the step checks
+before it uploads anything rather than failing at the end of the push.
+
+### Or from an artifact, by hand
+
 The frontend reads `<root>/<name>/meta.json` and `?repo=` selects the name, so
 an artifact downloaded from CI is unpacked and served as it stands:
 
 ```bash
 gh run download -n trust-index -D index
-cp -r index/* /path/to/trust/web/public/index/
-cd /path/to/trust/web && npm run dev     # http://localhost:5173/?repo=mylibrary
+cp -r index/* /path/to/trust-web/public/index/
+cd /path/to/trust-web && npm run dev     # http://localhost:5173/?repo=mylibrary
 ```
 
 ## Versioning
