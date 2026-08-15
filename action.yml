@@ -156,6 +156,34 @@ inputs:
       sources and the toolchain.
     required: false
     default: 'true'
+  publish:
+    description: >-
+      Where to publish the index so that a browser can read it.  `false`, the
+      default, publishes nothing and leaves the directory for the caller to
+      upload as an artifact.  `branch` force-pushes it to `publish-branch` of
+      this repository, where `raw.githubusercontent.com` serves it.
+
+      A branch rather than the workflow artifact, because an artifact is not
+      readable by a browser: downloading one requires a token with the `repo`
+      scope even when the repository is public, so a frontend reading artifacts
+      would have to ask every reader for full control of their private
+      repositories in order to show them a public dependency graph.  A branch is
+      anonymous, is served with `Access-Control-Allow-Origin: *` and gzip, and
+      does not expire after thirty days as an artifact does.
+
+      What it costs is repository size — an index is hundreds of megabytes
+      unpacked — which is why the branch is orphaned and force-pushed rather
+      than added to: it stays one commit deep, and the objects it replaces fall
+      unreferenced.  Needs `permissions: contents: write` in the calling job.
+    required: false
+    default: 'false'
+  publish-branch:
+    description: >-
+      The branch `publish: branch` writes to.  The default is what the frontend
+      looks for when given only a repository, so changing it means readers have
+      to be told the branch as well.
+    required: false
+    default: 'trust-index'
 
 outputs:
   index-path:
@@ -175,6 +203,11 @@ outputs:
   decl-count:
     description: 'How many declarations the index holds.'
     value: ${{ steps.report.outputs.decl-count }}
+  index-url:
+    description: >-
+      Where the published index is readable, when `publish` wrote one; empty
+      otherwise.  This is the base a frontend fetches `meta.json` from.
+    value: ${{ steps.publish.outputs.index-url }}
   trust-bin:
     description: >-
       The `trust` binary that was built, so a later step can run `trust check`
@@ -205,6 +238,8 @@ runs:
         BUILD_LIBRARY: ${{ inputs.build-library }}
         REQUIRE_MATCHING_TOOLCHAIN: ${{ inputs.require-matching-toolchain }}
         CACHE: ${{ inputs.cache }}
+        PUBLISH: ${{ inputs.publish }}
+        PUBLISH_BRANCH: ${{ inputs.publish-branch }}
         TRUST_REF: ${{ inputs.trust-ref }}
         # The repository `trust-ref` names a ref in, and the one `auto` looks
         # for release tags in.  A constant rather than an input: the checkout
@@ -240,6 +275,24 @@ runs:
         reject_newlines index-name "$INDEX_NAME"
         reject_newlines output-dir "$OUTPUT_DIR"
         reject_newlines working-directory "$WORKING_DIRECTORY"
+
+        # Not a boolean: `false` is a destination like any other, and leaving
+        # room for a second one is cheaper than changing the type later.
+        case "$PUBLISH" in
+          false|branch) ;;
+          true)
+            echo "::error::input \`publish\` names a destination, not a flag: use 'branch' rather than 'true'"
+            exit 1 ;;
+          *) echo "::error::input \`publish\` must be 'false' or 'branch', not '$PUBLISH'"; exit 1 ;;
+        esac
+        # It becomes a ref name and a path segment of a raw.githubusercontent
+        # URL, so the same vocabulary as `index-name` — which also rules out the
+        # leading dash, the `..` and the other things git refuses in a ref.
+        case "$PUBLISH_BRANCH" in
+          *[!A-Za-z0-9._/-]*|''|.|..|-*|/*|*/)
+            echo "::error::\`publish-branch\` must be a plain branch name: '$PUBLISH_BRANCH'"
+            exit 1 ;;
+        esac
 
         # A module name with a space in it is two arguments to the exporter, and
         # one starting with `-` is an option; both fail obscurely much later.
@@ -355,6 +408,8 @@ runs:
           echo "trust-src=$TRUST_SRC"
           echo "checkout-ref=$CHECKOUT_REF"
           echo "export-flags=$FLAGS"
+          echo "publish=$PUBLISH"
+          echo "publish-branch=$PUBLISH_BRANCH"
         } >> "$GITHUB_OUTPUT"
 
     # Unconditional: `resolve` either produced a ref or failed, so a skipped
@@ -566,4 +621,70 @@ runs:
           echo "| body edges | $BODY_EDGES |"
           echo "| revision | \`${REV:-unknown}\` |"
           echo "| size | $(du -sh "$INDEX_PATH" | cut -f1) |"
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # Push the index where a browser can read it.  `raw.githubusercontent.com`
+    # serves a branch anonymously, with CORS and gzip, which is the whole
+    # requirement — see the `publish` input for why not the artifact.
+    - name: Publish the index
+      id: publish
+      if: steps.resolve.outputs.publish == 'branch'
+      shell: bash
+      env:
+        INDEX_ROOT: ${{ steps.resolve.outputs.index-root }}
+        INDEX_NAME: ${{ steps.resolve.outputs.index-name }}
+        BRANCH: ${{ steps.resolve.outputs.publish-branch }}
+        REV: ${{ steps.report.outputs.rev }}
+        # Composite actions get the job's token, so publishing to this
+        # repository needs no secret of its own — only `permissions:
+        # contents: write` on the job, which is why the failure below says so.
+        TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        cd "$INDEX_ROOT"
+
+        # git refuses blobs over 100 MB, and the push would fail after however
+        # long it takes to send everything before it.  `decls.jsonl` is the file
+        # that grows with the library, so this is a real ceiling rather than a
+        # theoretical one, and it is worth naming before the upload rather than
+        # after.
+        TOO_BIG="$(find . -type f -size +100M -printf '%p (%s bytes)\n' || true)"
+        if [ -n "$TOO_BIG" ]; then
+          echo "::error::these files exceed GitHub's 100 MB limit, so the index cannot be published to a branch:"
+          printf '%s\n' "$TOO_BIG"
+          echo "::error::export a smaller index — \`with-code: false\` drops the largest part — or host it elsewhere"
+          exit 1
+        fi
+
+        # A repository of its own, made fresh: the index is a snapshot rather
+        # than a history, and an orphan force-pushed each run keeps the branch
+        # one commit deep.  Anything else accumulates hundreds of megabytes per
+        # run in a repository people clone for its mathematics.
+        rm -rf .git
+        git init -q
+        git checkout -q --orphan "$BRANCH"
+        # 20 MB of packed edge pairs must not be run through end-of-line
+        # conversion by a reader who has `core.autocrlf` set.
+        printf '* -text\n' > .gitattributes
+        git config user.name 'github-actions[bot]'
+        git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+        git add -A
+        git commit -q -m "trust index of ${REV:-$GITHUB_SHA}"
+
+        # The token is masked in logs, but keeping it out of them entirely is
+        # cheaper than relying on that.
+        if ! git push -q --force \
+            "https://x-access-token:${TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            "HEAD:refs/heads/$BRANCH" 2>/dev/null; then
+          echo "::error::could not push to \`$BRANCH\`.  A job that publishes needs \`permissions: contents: write\`."
+          exit 1
+        fi
+
+        URL="https://raw.githubusercontent.com/$GITHUB_REPOSITORY/$BRANCH/$INDEX_NAME"
+        echo "index-url=$URL" >> "$GITHUB_OUTPUT"
+
+        {
+          echo
+          echo "Published to [\`$BRANCH\`](https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH), readable at"
+          echo "[\`$URL/meta.json\`]($URL/meta.json) — open \`?gh=$GITHUB_REPOSITORY\` in a trust frontend."
         } >> "$GITHUB_STEP_SUMMARY"
