@@ -66,9 +66,29 @@ inputs:
     description: >-
       Export the edges that come from definition bodies.  Without them
       definitions do not unfold in the UI, which is most of what it is for.
-      Proof terms are never exported, with or without this.
+      Proof terms are left out either way; `with-proofs` is what includes them.
     required: false
     default: 'true'
+  with-proofs:
+    description: >-
+      Export the edges that come from proof terms, which `with-bodies` alone
+      stops at.  Implies `with-bodies`, since proof edges are body edges and go
+      in the same file.
+
+      Off by default, and the default is a claim about meaning rather than a
+      saving: a theorem rests on its statement, not on whatever closed it, so an
+      index without these shows a theorem's statement dependencies and never
+      lists it as a dependent of something its proof merely touched.  Turning it
+      on answers the other question — what a proof actually used — and reverses
+      that in both directions.  It is not small: for Lean core the body edges go
+      from 93,335 to 875,271.
+
+      Unlike every other input here this one needs a `trust` new enough to have
+      it, and under `trust-ref: auto` the exporter is chosen by your toolchain
+      rather than by this file.  An exporter that does not know the flag is
+      refused before the export runs, naming this input.
+    required: false
+    default: 'false'
   with-code:
     description: >-
       Export rendered, clickable declaration source.  This is the largest part
@@ -232,6 +252,7 @@ runs:
         OUTPUT_DIR: ${{ inputs.output-dir }}
         WORKING_DIRECTORY: ${{ inputs.working-directory }}
         WITH_BODIES: ${{ inputs.with-bodies }}
+        WITH_PROOFS: ${{ inputs.with-proofs }}
         WITH_CODE: ${{ inputs.with-code }}
         WITH_HASHES: ${{ inputs.with-hashes }}
         FAST_PROP: ${{ inputs.fast-prop }}
@@ -265,6 +286,7 @@ runs:
         }
 
         check_bool with-bodies "$WITH_BODIES"
+        check_bool with-proofs "$WITH_PROOFS"
         check_bool with-code "$WITH_CODE"
         check_bool with-hashes "$WITH_HASHES"
         check_bool fast-prop "$FAST_PROP"
@@ -396,6 +418,11 @@ runs:
 
         FLAGS=""
         if [ "$WITH_BODIES" = true ]; then FLAGS="$FLAGS --with-bodies"; fi
+        # `--with-proofs` implies `--with-bodies` in the exporter, so the two
+        # together are not a contradiction to resolve here: passing both says
+        # what the caller asked for, and passing only this one still writes the
+        # definition bodies.
+        if [ "$WITH_PROOFS" = true ]; then FLAGS="$FLAGS --with-proofs"; fi
         if [ "$WITH_CODE" = true ]; then FLAGS="$FLAGS --with-code"; fi
         if [ "$WITH_HASHES" = true ]; then FLAGS="$FLAGS --with-hashes"; fi
         if [ "$FAST_PROP" = true ]; then FLAGS="$FLAGS --fast-prop"; fi
@@ -571,6 +598,28 @@ runs:
         if [ -n "$REV" ]; then args+=(--rev "$REV"); fi
         args+=("$MODULE")
 
+        # This action and the exporter are separately versioned, and under
+        # `trust-ref: auto` the caller's toolchain picks the exporter — so a
+        # flag added here can be handed to a `trust` released before it existed.
+        # Every other flag this action passes is understood by every trust
+        # release there is; this one is not, and an `unknown option` out of the
+        # exporter names neither the input that caused it nor the fact that the
+        # two came from different commits.
+        case " $EXPORT_FLAGS " in
+          *" --with-proofs "*)
+            # Read into a variable rather than piped into grep: `pipefail` is
+            # set, and a `grep -q` that matches early leaves the exporter with a
+            # SIGPIPE, so the pipeline would report failure precisely when the
+            # flag *is* supported.
+            HELP="$(lake env "$TRUST_BIN" --help 2>&1 || true)"
+            case "$HELP" in
+              *--with-proofs*) ;;
+              *)
+                echo "::error::\`with-proofs\` needs a trust that has it, and this one does not: under \`trust-ref: auto\` the exporter is the release built for your \`lean-toolchain\`, which may predate the flag.  Either set \`with-proofs: false\`, or pin a newer \`trust-ref\`."
+                exit 1 ;;
+            esac ;;
+        esac
+
         lake env "$TRUST_BIN" "${args[@]}"
 
     - name: Report what was written
@@ -592,11 +641,21 @@ runs:
         # caller is told is then what a reader of the index will see.
         field () { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\"\\([^\"]*\\)\".*/\\1/p" "$META" | head -1; }
         number () { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p" "$META" | head -1; }
+        # `[a-z]` rather than `true\|false`, which is a GNU extension in a
+        # basic regex: a string value starts with a quote, so nothing else in
+        # this file can match it.
+        flag () { sed -n "s/.*\"$1\"[[:space:]]*:[[:space:]]*\\([a-z][a-z]*\\).*/\\1/p" "$META" | head -1; }
 
         REV="$(field rev)"
         DECL_COUNT="$(number declCount)"
         STMT_EDGES="$(number stmtEdgeCount)"
         BODY_EDGES="$(number bodyEdgeCount)"
+        # Whether the body edges include proof terms cannot be seen in the edge
+        # file, and it changes what every one of those edges means, so it is
+        # worth a word in the summary.  An exporter too old to write the field
+        # leaves this empty, which is the same as false: it had no such mode.
+        BODY_NOTE=""
+        if [ "$(flag hasProofEdges)" = true ]; then BODY_NOTE=", proof terms included"; fi
 
         # Not fatal: an index without a revision is still a usable index, it
         # just cannot be tied to a commit.  git declines to answer in a checkout
@@ -618,7 +677,7 @@ runs:
           echo "|---|---|"
           echo "| declarations | $DECL_COUNT |"
           echo "| statement edges | $STMT_EDGES |"
-          echo "| body edges | $BODY_EDGES |"
+          echo "| body edges | $BODY_EDGES$BODY_NOTE |"
           echo "| revision | \`${REV:-unknown}\` |"
           echo "| size | $(du -sh "$INDEX_PATH" | cut -f1) |"
         } >> "$GITHUB_STEP_SUMMARY"

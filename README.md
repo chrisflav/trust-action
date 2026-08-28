@@ -68,6 +68,18 @@ not been released:
           trust-ref: v4.32.0     # or a branch, or a commit
 ```
 
+It cuts the other way too: an input here can name an export flag that the
+exporter your toolchain selects has never heard of. `with-proofs` is the first
+one — every other flag this action passes is understood by every `trust` release
+there is — and asking for it from a `trust` that predates it fails before the
+export runs, saying so:
+
+```
+::error::`with-proofs` needs a trust that has it, and this one does not: under
+`trust-ref: auto` the exporter is the release built for your `lean-toolchain`,
+which may predate the flag.
+```
+
 ## Inputs
 
 | input | default | |
@@ -76,7 +88,8 @@ not been released:
 | `index-name` | the repository's name | Output subdirectory, and the `?repo=` value the frontend selects the index by. |
 | `output-dir` | `trust-index` | Where to write; the index lands in `<output-dir>/<index-name>`. Relative paths are from the workspace root, not from `working-directory`. |
 | `working-directory` | `.` | The Lake package to export, for a package that is not at the repository root. |
-| `with-bodies` | `true` | Export the edges that come from definition bodies. Without them definitions do not unfold in the UI. Proof terms are never exported either way. |
+| `with-bodies` | `true` | Export the edges that come from definition bodies. Without them definitions do not unfold in the UI. Proof terms are left out either way; `with-proofs` is what includes them. |
+| `with-proofs` | `false` | Also export the edges that come from proof terms, which `with-bodies` alone stops at; implies it. Off by default because leaving them out is a claim about meaning: a theorem rests on its statement, not on whatever closed it. On, an index answers the other question — what a proof used — and a theorem becomes a dependent of everything its proof touched. Not small: for Lean core the body edges go from 93,335 to 875,271. Needs a `trust` new enough to have the flag; see below. |
 | `with-code` | `true` | Export rendered, clickable declaration source. The largest part of an index by far — but without it the UI shows names and no statements. |
 | `with-hashes` | `true` | Record each declaration's semantic hash, so the index can be matched against trust certificates and against the snapshots `trust check` reads. A pass over the whole environment — the same cost whether or not `module-filter` narrows what is exported. Turn it off for an index that only has to be read. |
 | `fast-prop` | `false` | Treat exactly the theorems as proofs instead of asking `MetaM`. Faster, and wrong for a definition whose type happens to be a `Prop`. |

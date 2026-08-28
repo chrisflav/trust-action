@@ -185,3 +185,55 @@ jobs:
           # repository whose Lean lives in a subdirectory has none.
           cd library
           lake env "$TRUST_BIN" --help > /dev/null
+
+  # The split versioning cutting the other way: an input here can name an export
+  # flag that the exporter selected for a caller's toolchain has never heard of.
+  # `with-proofs` is the first such input, and v4.32.0 is a release that will
+  # never gain it — so this is a fixed question with a fixed answer, and the
+  # answer has to come from the action, before the export runs, rather than as
+  # an `unknown option` out of the exporter with nothing to say about which
+  # input caused it.
+  unsupported-flag:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Write a Lake package pinned to Lean v4.32.0
+        shell: bash
+        run: .github/scripts/scratch-package.sh library v4.32.0
+
+      - id: index
+        continue-on-error: true
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          working-directory: library
+          # Pinned rather than `auto`, so that this keeps testing the same pair
+          # once a release does carry the flag.
+          trust-ref: v4.32.0
+          with-proofs: 'true'
+          with-code: 'false'
+
+      - name: Check that it refused, rather than exporting something else
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.index.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::the action reported '$OUTCOME' for a flag this exporter does not have"
+            exit 1
+          fi
+          # An index written and then abandoned would be the worse failure: a
+          # caller who asked for proof edges must not be handed one without
+          # them.  Looked for in the default output directory rather than
+          # through the `index-path` output, which a failed action does not
+          # produce — and an empty path would make this check pass by finding
+          # nothing anywhere.
+          WROTE="$(find trust-index -name meta.json 2>/dev/null || true)"
+          if [ -n "$WROTE" ]; then
+            echo "::error::it wrote an index anyway: $WROTE"
+            exit 1
+          fi
+          echo "refused, as it should"
