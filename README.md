@@ -44,7 +44,7 @@ reads it, by default:
 ```
 library/lean-toolchain    leanprover/lean4:v4.32.0
                                             ↓
-chrisflav/trust           tag v4.32.0 → commit fc94653 → built, then run
+chrisflav/trust           tag v4.32.0 → commit a71e57d → built, then run
 ```
 
 The tag is resolved to the commit it points at, so a moved tag cannot be served

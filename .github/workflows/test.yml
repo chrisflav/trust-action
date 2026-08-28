@@ -188,11 +188,9 @@ jobs:
 
   # The split versioning cutting the other way: an input here can name an export
   # flag that the exporter selected for a caller's toolchain has never heard of.
-  # `with-proofs` is the first such input, and v4.32.0 is a release that will
-  # never gain it — so this is a fixed question with a fixed answer, and the
-  # answer has to come from the action, before the export runs, rather than as
-  # an `unknown option` out of the exporter with nothing to say about which
-  # input caused it.
+  # `with-proofs` is the first such input, and the answer has to come from the
+  # action, before the export runs, rather than as an `unknown option` out of
+  # the exporter with nothing to say about which input caused it.
   unsupported-flag:
     runs-on: ubuntu-latest
 
@@ -209,9 +207,12 @@ jobs:
         with:
           module: Init.Data.Nat.Gcd
           working-directory: library
-          # Pinned rather than `auto`, so that this keeps testing the same pair
-          # once a release does carry the flag.
-          trust-ref: v4.32.0
+          # A commit rather than a tag, and that is the whole of why this job
+          # works: a trust tag names a *toolchain*, so there is one per Lean and
+          # a new exporter for a Lean moves it.  v4.32.0 has already gained
+          # `--with-proofs` that way.  This is the commit it pointed at before,
+          # which is an exporter without the flag for ever.
+          trust-ref: fc946537bde170519f865c439904c397ac5ac59d
           with-proofs: 'true'
           with-code: 'false'
 
