@@ -26,7 +26,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        lean: ['v4.31.0', 'v4.32.0']
+        lean: ['v4.31.0', 'v4.32.0', 'v4.33.0-rc2']
 
     name: auto → trust ${{ matrix.lean }}
     runs-on: ubuntu-latest
