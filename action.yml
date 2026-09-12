@@ -181,20 +181,25 @@ inputs:
       Where to publish the index so that a browser can read it.  `false`, the
       default, publishes nothing and leaves the directory for the caller to
       upload as an artifact.  `branch` force-pushes it to `publish-branch` of
-      this repository, where `raw.githubusercontent.com` serves it.
+      this repository, where `raw.githubusercontent.com` serves it.  `release`
+      uploads it file by file to the release at `publish-tag`.
 
-      A branch rather than the workflow artifact, because an artifact is not
-      readable by a browser: downloading one requires a token with the `repo`
-      scope even when the repository is public, so a frontend reading artifacts
-      would have to ask every reader for full control of their private
-      repositories in order to show them a public dependency graph.  A branch is
-      anonymous, is served with `Access-Control-Allow-Origin: *` and gzip, and
-      does not expire after thirty days as an artifact does.
+      Neither is the workflow artifact, because an artifact is not readable by a
+      browser: downloading one requires a token with the `repo` scope even when
+      the repository is public — the metadata is anonymous but the bytes are not
+      — so a frontend reading artifacts would have to ask every reader for full
+      control of their private repositories in order to show them a public
+      dependency graph.
 
-      What it costs is repository size — an index is hundreds of megabytes
-      unpacked — which is why the branch is orphaned and force-pushed rather
-      than added to: it stays one commit deep, and the objects it replaces fall
-      unreferenced.  Needs `permissions: contents: write` in the calling job.
+      Between the two: `branch` costs repository size, since an index is tens to
+      hundreds of megabytes and git keeps what it is given, and it stops at
+      git's 100 MB blob limit.  `release` costs nothing in the repository, lifts
+      that ceiling to 2 GB per file, and gives each index an immutable home — but
+      release assets carry no `Access-Control-Allow-Origin`, so a browser can
+      only read them through a proxy on its own origin, which the trust-web
+      deployment provides and a bare static copy does not.
+
+      Both need `permissions: contents: write` in the calling job.
     required: false
     default: 'false'
   publish-branch:
@@ -202,6 +207,15 @@ inputs:
       The branch `publish: branch` writes to.  The default is what the frontend
       looks for when given only a repository, so changing it means readers have
       to be told the branch as well.
+    required: false
+    default: 'trust-index'
+  publish-tag:
+    description: >-
+      The tag `publish: release` hangs its release off.  A fixed tag rather than
+      the version being released: an index is of a revision, not of a version,
+      and the frontend has to be able to find it from a repository name alone.
+      The release is re-pointed at each run's commit and its assets replaced, so
+      the tag always names the current index.
     required: false
     default: 'trust-index'
 
@@ -225,9 +239,13 @@ outputs:
     value: ${{ steps.report.outputs.decl-count }}
   index-url:
     description: >-
-      Where the published index is readable, when `publish` wrote one; empty
-      otherwise.  This is the base a frontend fetches `meta.json` from.
-    value: ${{ steps.publish.outputs.index-url }}
+      Where the published index is, when `publish` wrote one; empty otherwise.
+
+      For `branch` this is the base a frontend fetches `meta.json` from.  For
+      `release` it is the prefix the assets hang off, which is not the same
+      thing: their names have the layout folded into them, so a frontend reads
+      them through a proxy that unfolds it rather than from here directly.
+    value: ${{ steps.publish.outputs.index-url || steps.publish-release.outputs.index-url }}
   trust-bin:
     description: >-
       The `trust` binary that was built, so a later step can run `trust check`
@@ -261,6 +279,7 @@ runs:
         CACHE: ${{ inputs.cache }}
         PUBLISH: ${{ inputs.publish }}
         PUBLISH_BRANCH: ${{ inputs.publish-branch }}
+        PUBLISH_TAG: ${{ inputs.publish-tag }}
         TRUST_REF: ${{ inputs.trust-ref }}
         # The repository `trust-ref` names a ref in, and the one `auto` looks
         # for release tags in.  A constant rather than an input: the checkout
@@ -301,11 +320,11 @@ runs:
         # Not a boolean: `false` is a destination like any other, and leaving
         # room for a second one is cheaper than changing the type later.
         case "$PUBLISH" in
-          false|branch) ;;
+          false|branch|release) ;;
           true)
-            echo "::error::input \`publish\` names a destination, not a flag: use 'branch' rather than 'true'"
+            echo "::error::input \`publish\` names a destination, not a flag: use 'branch' or 'release' rather than 'true'"
             exit 1 ;;
-          *) echo "::error::input \`publish\` must be 'false' or 'branch', not '$PUBLISH'"; exit 1 ;;
+          *) echo "::error::input \`publish\` must be 'false', 'branch' or 'release', not '$PUBLISH'"; exit 1 ;;
         esac
         # It becomes a ref name and a path segment of a raw.githubusercontent
         # URL, so the same vocabulary as `index-name` — which also rules out the
@@ -313,6 +332,15 @@ runs:
         case "$PUBLISH_BRANCH" in
           *[!A-Za-z0-9._/-]*|''|.|..|-*|/*|*/)
             echo "::error::\`publish-branch\` must be a plain branch name: '$PUBLISH_BRANCH'"
+            exit 1 ;;
+        esac
+
+        # A tag, and also a path segment of the download URL the proxy builds,
+        # so no slashes here where a branch may have them: `releases/download`
+        # takes one segment for the tag and the next for the asset.
+        case "$PUBLISH_TAG" in
+          *[!A-Za-z0-9._-]*|''|.|..|-*)
+            echo "::error::\`publish-tag\` must be a plain tag name: '$PUBLISH_TAG'"
             exit 1 ;;
         esac
 
@@ -437,6 +465,7 @@ runs:
           echo "export-flags=$FLAGS"
           echo "publish=$PUBLISH"
           echo "publish-branch=$PUBLISH_BRANCH"
+          echo "publish-tag=$PUBLISH_TAG"
         } >> "$GITHUB_OUTPUT"
 
     # Unconditional: `resolve` either produced a ref or failed, so a skipped
@@ -746,4 +775,116 @@ runs:
           echo
           echo "Published to [\`$BRANCH\`](https://github.com/$GITHUB_REPOSITORY/tree/$BRANCH), readable at"
           echo "[\`$URL/meta.json\`]($URL/meta.json) — open \`?gh=$GITHUB_REPOSITORY\` in a trust frontend."
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    # The same index, uploaded file by file to a release instead.
+    #
+    # Not a tarball, because the frontend fetches the parts it needs and not the
+    # rest: `meta.json` first, then `decls.jsonl` and the edge files, then one
+    # `code/<n>.jsonl` shard whenever a declaration is put on screen.  A single
+    # asset would mean downloading every shard to read one.
+    #
+    # Release assets have no directory structure — an asset name is one flat
+    # string — so the index's own layout is folded into the name, `/` becoming
+    # `--`.  The proxy that serves these to a browser unfolds it again; see the
+    # `publish` input for why a proxy is needed at all.
+    - name: Publish the index to a release
+      id: publish-release
+      if: steps.resolve.outputs.publish == 'release'
+      shell: bash
+      env:
+        INDEX_ROOT: ${{ steps.resolve.outputs.index-root }}
+        INDEX_NAME: ${{ steps.resolve.outputs.index-name }}
+        TAG: ${{ steps.resolve.outputs.publish-tag }}
+        REV: ${{ steps.report.outputs.rev }}
+        # `gh` reads this; the job's own token suffices, as for the branch, and
+        # needs the same `permissions: contents: write`.
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        cd "$INDEX_ROOT"
+
+        # 2 GB is the per-asset ceiling, twenty times what a branch allows, but
+        # it is still a ceiling and `decls.jsonl` is still what grows with the
+        # library.  Named before the upload rather than after however many
+        # gigabytes have already gone over the wire.
+        TOO_BIG="$(find "$INDEX_NAME" -type f -size +2000M -printf '%p (%s bytes)\n' || true)"
+        if [ -n "$TOO_BIG" ]; then
+          echo "::error::these files exceed GitHub's 2 GB release-asset limit:"
+          printf '%s\n' "$TOO_BIG"
+          echo "::error::export a smaller index — \`with-code: false\` drops the largest part"
+          exit 1
+        fi
+
+        # Fold the layout into the names, in a staging directory because `gh
+        # release upload` takes the asset name from the file name and nothing
+        # else.  A copy rather than a rename: the index directory is an output
+        # of this action and a later step may still want to read it.
+        STAGE="$(mktemp -d)"
+        NEW_NAMES="$(mktemp)"
+        while IFS= read -r file; do
+          asset="${file//\//--}"
+          cp "$file" "$STAGE/$asset"
+          printf '%s\n' "$asset" >> "$NEW_NAMES"
+        done < <(find "$INDEX_NAME" -type f | sort)
+
+        if [ ! -s "$NEW_NAMES" ]; then
+          echo "::error::no files under $INDEX_ROOT/$INDEX_NAME to publish"
+          exit 1
+        fi
+
+        # A release at a fixed tag, and explicitly not the repository's latest:
+        # a library that makes real releases should not find `trust-index` in
+        # front of them on its releases page.
+        if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+          # Re-point the tag at what was actually exported, so that the tag and
+          # the `rev` in `meta.json` agree.  `--force`, because this tag is a
+          # moving label for the current index rather than a fixed version.
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+            -f sha="$GITHUB_SHA" -F force=true > /dev/null
+          # `make_latest` on every run, not only at creation: a release that was
+          # made before this flag existed would otherwise stay in front of the
+          # library's real ones forever.
+          RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)"
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -f body="trust index of ${REV:-$GITHUB_SHA}" -f make_latest=false > /dev/null
+        else
+          if ! gh release create "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "trust index" \
+              --notes "trust index of ${REV:-$GITHUB_SHA}" \
+              --target "$GITHUB_SHA" \
+              --latest=false > /dev/null; then
+            echo "::error::could not create the \`$TAG\` release.  A job that publishes needs \`permissions: contents: write\`."
+            exit 1
+          fi
+        fi
+
+        # Upload before deleting, so that the window in which the index is
+        # incomplete is as short as the upload and not as long as the run.
+        if ! gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" "$STAGE"/* --clobber; then
+          echo "::error::could not upload to \`$TAG\`.  A job that publishes needs \`permissions: contents: write\`."
+          exit 1
+        fi
+
+        # What a previous run left that this one did not write — a library that
+        # shrinks by a code shard would otherwise keep serving the old one.
+        # Scoped to this index's own prefix: a release may hold several.
+        gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' \
+          | while IFS= read -r existing; do
+              case "$existing" in
+                "$INDEX_NAME--"*)
+                  if ! grep -qxF "$existing" "$NEW_NAMES"; then
+                    gh release delete-asset "$TAG" "$existing" --repo "$GITHUB_REPOSITORY" --yes
+                  fi ;;
+              esac
+            done
+
+        URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
+        echo "index-url=$URL" >> "$GITHUB_OUTPUT"
+
+        {
+          echo
+          echo "Published $(wc -l < "$NEW_NAMES") assets to the [\`$TAG\`](https://github.com/$GITHUB_REPOSITORY/releases/tag/$TAG) release."
+          echo "Open \`?release=$GITHUB_REPOSITORY\` in a trust frontend that proxies release assets."
         } >> "$GITHUB_STEP_SUMMARY"
