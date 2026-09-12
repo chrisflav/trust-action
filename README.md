@@ -100,8 +100,9 @@ which may predate the flag.
 | `trust-ref` | `auto` | Which `trust` to build: `auto` for the release matching your toolchain, or any ref in `chrisflav/trust`. |
 | `require-matching-toolchain` | `true` | Fail when the library and `trust` name different Lean toolchains. Under `auto` they agree by construction; what this then catches is a release tagged for a Lean it was not built on. |
 | `cache` | `true` | Cache the built `trust` binary between runs, keyed on a hash of its sources and the toolchain. |
-| `publish` | `false` | Where to publish the index so that a browser can read it. `branch` force-pushes it to `publish-branch`, where `raw.githubusercontent.com` serves it anonymously. Needs `permissions: contents: write` on the job. |
+| `publish` | `false` | Where to publish the index so that a browser can read it. `branch` force-pushes it to `publish-branch`, where `raw.githubusercontent.com` serves it anonymously. `release` uploads it file by file to the release at `publish-tag`. Either needs `permissions: contents: write` on the job. |
 | `publish-branch` | `trust-index` | The branch `publish: branch` writes to. The frontend looks there when given only a repository, so changing it means readers have to be told the branch as well. |
+| `publish-tag` | `trust-index` | The tag `publish: release` hangs its release off. Re-pointed at each run's commit, so the tag names the revision the index was exported from. |
 
 ## Outputs
 
@@ -112,7 +113,7 @@ which may predate the flag.
 | `index-name` | The name the index was written under, i.e. the `?repo=` value. |
 | `rev` | The revision recorded in the index, as `meta.json` reports it. |
 | `decl-count` | How many declarations the index holds. |
-| `index-url` | Where a published index is readable, i.e. the base a frontend fetches `meta.json` from. Empty unless `publish` wrote one. |
+| `index-url` | Where a published index is. For `branch`, the base a frontend fetches `meta.json` from; for `release`, the prefix its assets hang off — not a fetch base, since their names have the layout folded into them. Empty unless `publish` wrote one. |
 | `trust-bin` | The `trust` binary that was built, so a later step can run `trust check` or `trust cert issue` without building it twice. |
 
 Every run also writes a summary — declarations, edges, revision, size — to the
@@ -161,7 +162,7 @@ a token with the `repo` scope *even when the repository is public*, so a fronten
 that read artifacts would have to ask every reader for full control of their
 private repositories in order to show them a public dependency graph.  A branch
 is anonymous, `raw.githubusercontent.com` serves it with
-`Access-Control-Allow-Origin: *` and gzip, and it does not expire after thirty
+`Access-Control-Allow-Origin: *` and gzip, and it does not expire after ninety
 days the way an artifact does.
 
 What it costs is repository size.  Measured on a Mathlib-based development whose
@@ -170,6 +171,49 @@ push.  The branch is orphaned and force-pushed, so it stays one commit deep
 rather than accumulating that per run.  The ceiling is git's 100 MB per file;
 `decls.jsonl` is the file that grows with the library, and the step checks
 before it uploads anything rather than failing at the end of the push.
+
+
+### Published to a release instead
+
+```yaml
+permissions:
+  contents: write
+steps:
+  - uses: actions/checkout@v5
+  - uses: chrisflav/trust-action@v1
+    with:
+      module: MyLibrary
+      publish: release
+```
+
+The index goes to a `trust-index` release as one asset per file, and a frontend
+that proxies release assets reads it given nothing but the repository:
+`https://trust.example.org/?release=owner/repo`.
+
+Release assets have no directories, so the layout is folded into the name: the
+index's `code/7.jsonl` is the asset `mylibrary--code--7.jsonl`.  It is folded
+back by whatever serves the frontend, which is also what makes the assets
+readable at all — see below.
+
+**What it buys over a branch.**  Nothing is written to the repository, so the
+302 MB the branch costs a Mathlib-based development becomes nothing at all, and
+people cloning the library for its mathematics do not pay for its index.  The
+per-file ceiling goes from git's 100 MB to 2 GB, which is the difference between
+`with-code: true` being possible on a large library and not.  The tag is
+re-pointed each run, so the release names the revision it was exported from.
+
+**What it costs.**  Release assets are served without
+`Access-Control-Allow-Origin`, and with `Content-Disposition: attachment`.  They
+download perfectly well — anonymously, from the web interface or `curl`, with no
+token — but a browser on another origin cannot `fetch()` them.  So this mode
+needs a frontend deployment that proxies them onto its own origin, which
+[trust-web](https://github.com/chrisflav/trust-web) does at `/release/`.  A bare
+static copy of the frontend, with no server in front of it, can read a branch
+and cannot read a release.
+
+That is the whole of the trade: the branch costs repository size and buys
+serverless reading; the release costs a proxy and buys a repository that stays
+the size of its mathematics.
 
 ### Or from an artifact, by hand
 
