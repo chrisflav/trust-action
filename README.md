@@ -33,6 +33,53 @@ closure is indexed. Everything else has a default — the index is named after t
 repository, written to `trust-index/<name>/`, and the library is built first,
 since the export reads `.olean` files and something has to have produced them.
 
+## In a job that already builds the library
+
+That workflow is a job of its own, and to export the library it builds it — a
+second full build of something the repository's own CI built an hour ago. Where
+there is already a job that builds, the export is better as a step at the end of
+it:
+
+```yaml
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write            # only if you publish
+    steps:
+      - uses: actions/checkout@v5
+      - uses: leanprover/lean-action@v1      # whatever this job already does
+
+      - uses: chrisflav/trust-action@v1
+        with:
+          module: MyLibrary
+          setup-lean: 'false'
+          publish: release
+```
+
+`setup-lean: false` says the job has already installed elan and restored
+whatever cache it builds against, so the action does neither: it fetches and
+builds `trust`, exports against the `.olean` files the job's own build left
+behind, and publishes. The setup and the library build are the minutes; what is
+left is the export itself.
+
+It does still run `lake build` in the package — seconds after a build that has
+already happened, and the cheapest way to be sure the `.olean` files being
+exported are the checked-out sources'. `build-library: false` drops that too,
+which is what a job whose build step names its own targets or arguments wants,
+since this one builds the package's defaults.
+
+What no arrangement drops is building `trust`, which has to happen wherever the
+export does. `cache` — on by default — keys the binary on the exporter's
+sources, so that is one build per trust release rather than one per run.
+
+A job that has not in fact set Lean up is told so in the action's first step,
+rather than several minutes later by a build that fails for reasons of its own:
+
+```
+::error::no `lake` on PATH, and `setup-lean: false` says this job has one already.
+```
+
 ## Which exporter runs
 
 `trust` reads `.olean` files, and only the Lean that wrote one can read it. So a
@@ -96,7 +143,8 @@ which may predate the flag.
 | `module-filter` | every module | Restrict exported declarations to matching modules: a comma-separated list of `A.B.C`, `A.B.*`, `*`. Empty includes the dependencies' modules, which for a Mathlib-based library means Mathlib. |
 | `marks` | `trust-marks.json` | Marks file to carry into the index, relative to `working-directory` — the *indexed* repository's file. |
 | `rev` | read from git | Revision recorded in `meta.json`. Set it when the checkout is not the commit you mean, as for a pull request, whose checked-out commit is a merge that exists nowhere else. |
-| `build-library` | `true` | Build the library before exporting it. Turn off only if an earlier step already did. |
+| `setup-lean` | `true` | Install elan and the toolchain, through `leanprover/lean-action`, and let it restore the Mathlib build cache. Turn it off to run this action as a step of a job that has already done that — see [above](#in-a-job-that-already-builds-the-library). What such a job has to leave behind is `lake` on `PATH` and a built package; the first is checked in the action's first step. |
+| `build-library` | `true` | Build the library before exporting it. Turn off only if an earlier step already did. Under `setup-lean: false` this is a plain `lake build` of the package's default targets rather than lean-action's build, so a job whose own build step takes targets or arguments of its own wants it off. |
 | `trust-ref` | `auto` | Which `trust` to build: `auto` for the release matching your toolchain, or any ref in `chrisflav/trust`. |
 | `require-matching-toolchain` | `true` | Fail when the library and `trust` name different Lean toolchains. Under `auto` they agree by construction; what this then catches is a release tagged for a Lean it was not built on. |
 | `cache` | `true` | Cache the built `trust` binary between runs, keyed on a hash of its sources and the toolchain. |

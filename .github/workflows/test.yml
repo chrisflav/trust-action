@@ -238,3 +238,112 @@ jobs:
             exit 1
           fi
           echo "refused, as it should"
+
+  # The action as a step of a job that has already set Lean up and built the
+  # library, which is where it belongs in a repository that has CI at all: the
+  # index is of a build that is happening anyway, and `setup-lean: false` is the
+  # caller saying so.  What is under test is that the action then needs nothing
+  # of lean-action's — elan is on `PATH` because the job put it there, the
+  # `.olean` files are the job's own — and exports the same index regardless.
+  existing-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Write a Lake package pinned to Lean v4.33.0
+        shell: bash
+        run: .github/scripts/scratch-package.sh library v4.33.0
+
+      # Standing in for the caller's own CI.  This is the step the action is
+      # being added after, and nothing below may need more than it leaves
+      # behind.
+      - name: Set Lean up the way a caller's own workflow would
+        uses: leanprover/lean-action@v1
+        with:
+          lake-package-directory: library
+          build: true
+          test: false
+          lint: false
+
+      - id: index
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          index-name: core-gcd
+          working-directory: library
+          setup-lean: 'false'
+          # Left at its default, so what runs is the plain `lake build` this
+          # mode does in place of lean-action's — against a package that is
+          # already built, which is the case a caller is in.
+          with-code: 'false'
+          rev: existing-build
+
+      - name: Check the index
+        shell: bash
+        env:
+          INDEX_PATH: ${{ steps.index.outputs.index-path }}
+          DECL_COUNT: ${{ steps.index.outputs.decl-count }}
+          REV: ${{ steps.index.outputs.rev }}
+        run: |
+          set -euo pipefail
+
+          for f in meta.json decls.jsonl stmt-edges.bin; do
+            if [ ! -s "$INDEX_PATH/$f" ]; then
+              echo "::error::$INDEX_PATH/$f is missing or empty"
+              exit 1
+            fi
+          done
+          if [ "${DECL_COUNT:-0}" -lt 100 ]; then
+            echo "::error::the index holds $DECL_COUNT declarations"
+            exit 1
+          fi
+          if [ "$REV" != existing-build ]; then
+            echo "::error::rev output is '$REV', not the one that was passed in"
+            exit 1
+          fi
+          echo "exported from an existing build: $DECL_COUNT declarations"
+
+  # The other half of that claim: `setup-lean: false` is a promise about the
+  # job, and a job that has not kept it has to be told so at once.  Left
+  # unchecked this is the case that fails minutes later, inside `lake build` of
+  # the trust checkout, reading as though trust were unbuildable.
+  no-lean:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v5
+
+      # A package for the action to find, so that what fails is the missing
+      # Lean and not a missing `lean-toolchain`.  Nothing installs one here.
+      - name: Write a Lake package pinned to Lean v4.33.0
+        shell: bash
+        run: .github/scripts/scratch-package.sh library v4.33.0
+
+      - id: index
+        continue-on-error: true
+        uses: ./
+        with:
+          module: Init.Data.Nat.Gcd
+          working-directory: library
+          setup-lean: 'false'
+
+      - name: Check that it refused before fetching anything
+        shell: bash
+        env:
+          OUTCOME: ${{ steps.index.outcome }}
+        run: |
+          set -euo pipefail
+          if [ "$OUTCOME" != failure ]; then
+            echo "::error::the action reported '$OUTCOME' for a job with no Lean in it"
+            exit 1
+          fi
+          # "In its first step" is the part worth checking: the trust checkout
+          # is the step after, so a `.trust-source` here would mean the refusal
+          # came from somewhere later and the error a caller reads is some
+          # other step's.
+          if [ -e .trust-source ]; then
+            echo "::error::it fetched trust before noticing there was no Lean"
+            exit 1
+          fi
+          echo "refused, as it should"

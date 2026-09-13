@@ -139,11 +139,39 @@ inputs:
       checked-out commit is a merge that exists nowhere else.
     required: false
     default: ''
+  setup-lean:
+    description: >-
+      Install elan and the toolchain, through `leanprover/lean-action`, and let
+      it restore the Mathlib build cache.
+
+      Turn it off to run this action as a step of a job that has already done
+      all that — which is what a library's existing CI is.  It set Lean up and
+      built the library some steps ago, and doing either again here costs
+      minutes and changes nothing: the export reads the `.olean` files that are
+      already on disk.  What such a job has to have left behind is exactly what
+      the export needs — `lake` on `PATH`, and a built package — and the first
+      of those is checked in this action's first step rather than discovered
+      several steps later.
+
+      Off, `build-library` still runs `lake build` in the package: a few seconds
+      after the job's own build, and the cheapest way to be sure the `.olean`
+      files are the checked-out sources'.  But it runs without lean-action's
+      Mathlib cache behind it, so a job that has neither restored that cache nor
+      built the library must not turn this off — it would compile Mathlib from
+      source.
+    required: false
+    default: 'true'
   build-library:
     description: >-
       Build the library before exporting it.  The export reads `.olean` files,
       so something has to have built them; turn this off only if an earlier step
       in your job already did.
+
+      Under `setup-lean: true` this is lean-action's own build, Mathlib cache
+      and all.  Under `setup-lean: false` it is a plain `lake build` in
+      `working-directory`, which builds the package's default targets — so a job
+      whose own build step names other targets, or other arguments, wants this
+      off and its own build left to stand.
     required: false
     default: 'true'
   trust-ref:
@@ -274,6 +302,7 @@ runs:
         WITH_CODE: ${{ inputs.with-code }}
         WITH_HASHES: ${{ inputs.with-hashes }}
         FAST_PROP: ${{ inputs.fast-prop }}
+        SETUP_LEAN: ${{ inputs.setup-lean }}
         BUILD_LIBRARY: ${{ inputs.build-library }}
         REQUIRE_MATCHING_TOOLCHAIN: ${{ inputs.require-matching-toolchain }}
         CACHE: ${{ inputs.cache }}
@@ -309,6 +338,7 @@ runs:
         check_bool with-code "$WITH_CODE"
         check_bool with-hashes "$WITH_HASHES"
         check_bool fast-prop "$FAST_PROP"
+        check_bool setup-lean "$SETUP_LEAN"
         check_bool build-library "$BUILD_LIBRARY"
         check_bool require-matching-toolchain "$REQUIRE_MATCHING_TOOLCHAIN"
         check_bool cache "$CACHE"
@@ -386,6 +416,18 @@ runs:
           exit 1
         fi
         WORKING_DIRECTORY="$(cd "$WORKING_DIRECTORY" && pwd -P)"
+
+        # `setup-lean: false` is a claim about the job this action was dropped
+        # into, and it is almost the only thing this action then relies on that
+        # it did not do itself.  Checked here, in the first step, because
+        # everything that would otherwise reveal it comes minutes later and
+        # blames the wrong thing: `lake build` in the trust checkout failing
+        # with `command not found` reads as trust being unbuildable rather than
+        # as a job that never installed Lean.
+        if [ "$SETUP_LEAN" = false ] && ! command -v lake > /dev/null 2>&1; then
+          echo "::error::no \`lake\` on PATH, and \`setup-lean: false\` says this job has one already.  Either install Lean earlier in the job — leanprover/lean-action, or elan — or drop \`setup-lean\` and let this action do it."
+          exit 1
+        fi
 
         # `auto` lets the caller's toolchain choose the exporter.  A trust
         # release is a release *for* a Lean — the exporter reads `.olean` files,
@@ -558,13 +600,35 @@ runs:
     # rather than a hand-rolled elan install because it also knows about the
     # Mathlib build cache, without which indexing a Mathlib-based library would
     # start by compiling Mathlib.
+    #
+    # Skipped entirely for a job that has already done this, which is the shape
+    # a library's own CI has: an index is worth exporting from the build that is
+    # already happening, and asking that build to happen twice is most of what
+    # an added step costs.  See `setup-lean`.
     - name: Set up Lean and build the library
+      if: inputs.setup-lean == 'true'
       uses: leanprover/lean-action@v1
       with:
         lake-package-directory: ${{ inputs.working-directory }}
         build: ${{ inputs.build-library }}
         test: false
         lint: false
+
+    # The same build for that job, since `build-library` is a separate input and
+    # keeping its meaning means running it here too.  Ordinarily seconds — lake
+    # rebuilds nothing whose inputs have not moved — and what it buys is that
+    # the `.olean` files being exported are certainly the ones these sources
+    # produce, rather than whatever an earlier step in someone else's workflow
+    # happened to leave behind.
+    - name: Build the library
+      if: inputs.setup-lean == 'false' && inputs.build-library == 'true'
+      shell: bash
+      env:
+        WORK_DIR: ${{ steps.resolve.outputs.work-dir }}
+      run: |
+        set -euo pipefail
+        cd "$WORK_DIR"
+        lake build
 
     # Exact key, no `restore-keys`: a near-miss restore is a binary built from
     # some other version of these sources, which would then export a library
