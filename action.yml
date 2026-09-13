@@ -242,8 +242,10 @@ inputs:
       The tag `publish: release` hangs its release off.  A fixed tag rather than
       the version being released: an index is of a revision, not of a version,
       and the frontend has to be able to find it from a repository name alone.
-      The release is re-pointed at each run's commit and its assets replaced, so
-      the tag always names the current index.
+      The release is re-pointed at each run's commit, its assets replaced, and
+      the release itself published afresh — so the tag, the date on the releases
+      page and the assets all describe the current index rather than the first
+      one.
     required: false
     default: 'trust-index'
 
@@ -900,6 +902,10 @@ runs:
         # A release at a fixed tag, and explicitly not the repository's latest:
         # a library that makes real releases should not find `trust-index` in
         # front of them on its releases page.
+        #
+        # Empty when this run creates the release, which is how the re-publish
+        # at the end of this step knows there is nothing to re-publish.
+        RELEASE_ID=""
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
           # Re-point the tag at what was actually exported, so that the tag and
           # the `rev` in `meta.json` agree.  `--force`, because this tag is a
@@ -908,10 +914,14 @@ runs:
             -f sha="$GITHUB_SHA" -F force=true > /dev/null
           # `make_latest` on every run, not only at creation: a release that was
           # made before this flag existed would otherwise stay in front of the
-          # library's real ones forever.
+          # library's real ones forever.  `target_commitish` for the same reason
+          # the tag is moved: it is the release's own record of what it is of,
+          # and left alone it keeps naming whatever commit first created it.
           RELEASE_ID="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq .id)"
           gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
-            -f body="trust index of ${REV:-$GITHUB_SHA}" -f make_latest=false > /dev/null
+            -f body="trust index of ${REV:-$GITHUB_SHA}" \
+            -f target_commitish="$GITHUB_SHA" \
+            -f make_latest=false > /dev/null
         else
           if ! gh release create "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
@@ -943,6 +953,29 @@ runs:
                   fi ;;
               esac
             done
+
+        # The date on the releases page is `published_at`, and no amount of
+        # PATCHing will set it: a release keeps the moment it was first
+        # published for ever, however often its assets are replaced.  So a
+        # release holding an index exported minutes ago goes on announcing
+        # itself as weeks old, and a reader deciding whether this index is
+        # current reads the one field that is not.
+        #
+        # Publishing is the only thing that moves it, so the release is drafted
+        # and published again — here, at the end, where what it holds is already
+        # this run's index.  A draft is not readable, so the two calls go back to
+        # back: the window in which the index is unreachable is a round trip
+        # rather than the length of an upload.  The rest of the release comes
+        # through untouched — the git tag stays where this step put it, the
+        # assets keep their ids — with the one exception of `make_latest`, since
+        # publishing is exactly when GitHub decides whether this is the newest
+        # release the repository has.
+        if [ -n "$RELEASE_ID" ]; then
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=true > /dev/null
+          gh api -X PATCH "repos/$GITHUB_REPOSITORY/releases/$RELEASE_ID" \
+            -F draft=false -f make_latest=false > /dev/null
+        fi
 
         URL="https://github.com/$GITHUB_REPOSITORY/releases/download/$TAG"
         echo "index-url=$URL" >> "$GITHUB_OUTPUT"
