@@ -150,7 +150,7 @@ which may predate the flag.
 | `cache` | `true` | Cache the built `trust` binary between runs, keyed on a hash of its sources and the toolchain. |
 | `publish` | `false` | Where to publish the index so that a browser can read it. `branch` force-pushes it to `publish-branch`, where `raw.githubusercontent.com` serves it anonymously. `release` uploads it file by file to the release at `publish-tag`. Either needs `permissions: contents: write` on the job. |
 | `publish-branch` | `trust-index` | The branch `publish: branch` writes to. The frontend looks there when given only a repository, so changing it means readers have to be told the branch as well. |
-| `publish-tag` | `trust-index` | The tag `publish: release` hangs its release off. Re-pointed at each run's commit, so the tag names the revision the index was exported from. |
+| `publish-tag` | `trust-index` | The tag `publish: release` hangs its release off. Re-pointed at each run's commit, and the release published afresh, so that the date on the releases page names the current index too — GitHub's `published_at` is otherwise frozen at the first export for ever. |
 
 ## Outputs
 
@@ -248,7 +248,10 @@ readable at all — see below.
 people cloning the library for its mathematics do not pay for its index.  The
 per-file ceiling goes from git's 100 MB to 2 GB, which is the difference between
 `with-code: true` being possible on a large library and not.  The tag is
-re-pointed each run, so the release names the revision it was exported from.
+re-pointed each run and the release published again, so that both the tag and
+the date on the releases page name the revision the index was exported from;
+`published_at` is otherwise the moment the release was first made, whatever it
+holds now.
 
 **What it costs.**  Release assets are served without
 `Access-Control-Allow-Origin`, and with `Content-Disposition: attachment`.  They
